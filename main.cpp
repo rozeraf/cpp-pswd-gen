@@ -1,7 +1,6 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include <random>
 #include <algorithm>
 #include <fstream>
 #include <regex>
@@ -10,6 +9,50 @@
 #include <iomanip>
 #include <sstream>
 #include <set>
+#include <cstdint>
+#include <filesystem>
+#include <limits>
+#include <stdexcept>
+#include <cerrno>
+#include <cstring>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
+#include <openssl/rand.h>
+
+#ifndef DICEWARE_WORDLIST_PATH
+#define DICEWARE_WORDLIST_PATH "data/eff_large_wordlist.txt"
+#endif
+
+class SecureRandom {
+public:
+    std::uint64_t uniform(std::uint64_t upper_exclusive) const {
+        if (upper_exclusive == 0) {
+            throw std::invalid_argument("Random range must not be empty");
+        }
+
+        std::uint64_t value;
+        const std::uint64_t limit = std::numeric_limits<std::uint64_t>::max()
+                                  - (std::numeric_limits<std::uint64_t>::max() % upper_exclusive);
+        do {
+            if (RAND_priv_bytes(reinterpret_cast<unsigned char*>(&value), sizeof(value)) != 1) {
+                throw std::runtime_error("OpenSSL CSPRNG failed");
+            }
+        } while (value >= limit);
+        return value % upper_exclusive;
+    }
+
+    template <typename T>
+    void shuffle(std::vector<T>& values) const {
+        for (std::size_t i = values.size(); i > 1; --i) {
+            std::swap(values[i - 1], values[uniform(i)]);
+        }
+    }
+};
 
 class PasswordGenerator {
 private:
@@ -19,23 +62,37 @@ private:
     std::string special_chars = "!@#$%^&*()_+-=[]{}|;:,.<>?";
     std::string ambiguous_chars = "il1Lo0O";
 
-    std::vector<std::string> fallback_words = {
-        "apple", "mountain", "river", "sunset", "forest", "ocean", "thunder",
-        "crystal", "dragon", "phoenix", "wizard", "castle", "garden", "rainbow",
-        "butterfly", "diamond", "golden", "silver", "storm", "cloud", "moon",
-        "star", "fire", "water", "earth", "wind", "light", "shadow", "dream",
-        "magic", "knight", "sword", "shield", "crown", "tower", "bridge", "flower",
-        "tiger", "eagle", "wolf", "bear", "lion", "shark", "falcon", "panther",
-        "ruby", "emerald", "sapphire", "topaz", "pearl", "jade", "amber", "coral",
-        "hammer", "blade", "arrow", "spear", "axe", "bow", "staff", "wand",
-        "winter", "summer", "spring", "autumn", "frost", "blaze", "mist", "dawn"
-    };
+    std::vector<std::string> diceware_words;
+    SecureRandom rng;
 
-    std::random_device rd;
-    std::mt19937 gen;
+    void loadDicewareWords() {
+        std::vector<std::filesystem::path> candidates = {
+            DICEWARE_WORDLIST_PATH,
+            std::filesystem::path("data") / "eff_large_wordlist.txt"
+        };
+
+        std::ifstream file;
+        for (const auto& path : candidates) {
+            file.open(path);
+            if (file) break;
+            file.clear();
+        }
+        if (!file) {
+            throw std::runtime_error("EFF Diceware wordlist not found");
+        }
+
+        std::string dice_code;
+        std::string word;
+        while (file >> dice_code >> word) {
+            diceware_words.push_back(word);
+        }
+        if (diceware_words.size() != 7776) {
+            throw std::runtime_error("Invalid EFF Diceware wordlist (expected 7776 entries)");
+        }
+    }
 
 public:
-    PasswordGenerator() : gen(rd()) {}
+    PasswordGenerator() { loadDicewareWords(); }
 
     // Component structures for custom password builder
     struct Component {
@@ -57,18 +114,19 @@ public:
 
     std::string getRandomWord(int min_length = 3, int max_length = 10) {
         std::vector<std::string> suitable_words;
-        for (const auto& word : fallback_words) {
-            if (word.length() >= min_length && word.length() <= max_length) {
+        const auto min_size = static_cast<std::size_t>(std::max(0, min_length));
+        const auto max_size = static_cast<std::size_t>(std::max(0, max_length));
+        for (const auto& word : diceware_words) {
+            if (word.length() >= min_size && word.length() <= max_size) {
                 suitable_words.push_back(word);
             }
         }
 
         if (suitable_words.empty()) {
-            suitable_words = fallback_words;
+            suitable_words = diceware_words;
         }
 
-        std::uniform_int_distribution<> dis(0, suitable_words.size() - 1);
-        return suitable_words[dis(gen)];
+        return suitable_words[rng.uniform(suitable_words.size())];
     }
 
     std::string removeAmbiguous(const std::string& chars) {
@@ -96,35 +154,31 @@ public:
         if (use_lowercase) {
             std::string chars = exclude_ambiguous ? removeAmbiguous(lowercase) : lowercase;
             char_pool += chars;
-            std::uniform_int_distribution<> dis(0, chars.length() - 1);
             for (int i = 0; i < min_lowercase; i++) {
-                required_chars.push_back(chars[dis(gen)]);
+                required_chars.push_back(chars[rng.uniform(chars.size())]);
             }
         }
 
         if (use_uppercase) {
             std::string chars = exclude_ambiguous ? removeAmbiguous(uppercase) : uppercase;
             char_pool += chars;
-            std::uniform_int_distribution<> dis(0, chars.length() - 1);
             for (int i = 0; i < min_uppercase; i++) {
-                required_chars.push_back(chars[dis(gen)]);
+                required_chars.push_back(chars[rng.uniform(chars.size())]);
             }
         }
 
         if (use_digits) {
             std::string chars = exclude_ambiguous ? removeAmbiguous(digits) : digits;
             char_pool += chars;
-            std::uniform_int_distribution<> dis(0, chars.length() - 1);
             for (int i = 0; i < min_digits; i++) {
-                required_chars.push_back(chars[dis(gen)]);
+                required_chars.push_back(chars[rng.uniform(chars.size())]);
             }
         }
 
         if (use_special) {
             char_pool += special_chars;
-            std::uniform_int_distribution<> dis(0, special_chars.length() - 1);
             for (int i = 0; i < min_special; i++) {
-                required_chars.push_back(special_chars[dis(gen)]);
+                required_chars.push_back(special_chars[rng.uniform(special_chars.size())]);
             }
         }
 
@@ -132,21 +186,20 @@ public:
             throw std::invalid_argument("No character types selected");
         }
 
-        if (required_chars.size() > length) {
+        if (required_chars.size() > static_cast<std::size_t>(length)) {
             throw std::invalid_argument("Requirements exceed password length");
         }
 
-        std::uniform_int_distribution<> dis(0, char_pool.length() - 1);
         int remaining_length = length - required_chars.size();
         for (int i = 0; i < remaining_length; i++) {
-            required_chars.push_back(char_pool[dis(gen)]);
+            required_chars.push_back(char_pool[rng.uniform(char_pool.size())]);
         }
 
-        std::shuffle(required_chars.begin(), required_chars.end(), gen);
+        rng.shuffle(required_chars);
         return std::string(required_chars.begin(), required_chars.end());
     }
 
-    std::string generateMemorablePassword(int num_words = 4, const std::string& separator = "-",
+    std::string generateMemorablePassword(int num_words = 6, const std::string& separator = "-",
                                          bool add_numbers = true, bool capitalize = true,
                                          int word_min_length = 3, int word_max_length = 8) {
         std::vector<std::string> selected_words;
@@ -167,9 +220,8 @@ public:
         }
 
         if (add_numbers) {
-            std::uniform_int_distribution<> dis(0, 999);
             std::ostringstream oss;
-            oss << std::setfill('0') << std::setw(3) << dis(gen);
+            oss << std::setfill('0') << std::setw(3) << rng.uniform(1000);
             password += oss.str();
         }
 
@@ -184,8 +236,7 @@ public:
             std::string word = getRandomWord(4, 8);
 
             if (transform_words) {
-                std::uniform_int_distribution<> transform_dis(0, 3);
-                int transform_type = transform_dis(gen);
+                int transform_type = static_cast<int>(rng.uniform(4));
 
                 switch (transform_type) {
                     case 0:
@@ -206,15 +257,13 @@ public:
                         break;
                 }
 
-                std::uniform_int_distribution<> replace_dis(0, 2);
-                if (replace_dis(gen) == 0) {
+                if (rng.uniform(3) == 0) {
                     std::map<char, char> replacements = {
                         {'a', '4'}, {'e', '3'}, {'i', '1'}, {'o', '0'}, {'s', '5'}, {'t', '7'}
                     };
 
                     for (auto& pair : replacements) {
-                        std::uniform_int_distribution<> chance_dis(0, 1);
-                        if (chance_dis(gen) == 0) {
+                        if (rng.uniform(2) == 0) {
                             std::replace(word.begin(), word.end(), pair.first, pair.second);
                             std::replace(word.begin(), word.end(), static_cast<char>(std::toupper(pair.first)), pair.second);
                             break;
@@ -232,30 +281,24 @@ public:
         for (size_t i = 0; i < words.size(); i++) {
             password += words[i];
             if (i < words.size() - 1) {
-                std::uniform_int_distribution<> sep_dis(0, separators.size() - 1);
                 if (add_special_chars) {
-                    std::uniform_int_distribution<> special_chance(0, 1);
-                    if (special_chance(gen) == 0) {
-                        std::uniform_int_distribution<> special_sep_dis(3, separators.size() - 1);
-                        password += separators[special_sep_dis(gen)];
+                    if (rng.uniform(2) == 0) {
+                        password += separators[3 + rng.uniform(separators.size() - 3)];
                     } else {
-                        std::uniform_int_distribution<> normal_sep_dis(0, 2);
-                        password += separators[normal_sep_dis(gen)];
+                        password += separators[rng.uniform(3)];
                     }
                 } else {
-                    password += separators[sep_dis(gen)];
+                    password += separators[rng.uniform(separators.size())];
                 }
             }
         }
 
         if (add_numbers) {
             std::vector<std::string> positions = {"start", "middle", "end"};
-            std::uniform_int_distribution<> pos_dis(0, positions.size() - 1);
-            std::string position = positions[pos_dis(gen)];
+            std::string position = positions[rng.uniform(positions.size())];
 
-            std::uniform_int_distribution<> num_dis(0, 9999);
             std::ostringstream oss;
-            oss << std::setfill('0') << std::setw(2) << num_dis(gen);
+            oss << std::setfill('0') << std::setw(2) << rng.uniform(10000);
             std::string number = oss.str();
 
             if (position == "start") {
@@ -268,13 +311,10 @@ public:
             }
         }
 
-        while (password.length() < min_length && add_special_chars) {
+        while (password.length() < static_cast<std::size_t>(min_length) && add_special_chars) {
             std::string special_chars_subset = "!@#$%^&*";
-            std::uniform_int_distribution<> char_dis(0, special_chars_subset.length() - 1);
-            std::uniform_int_distribution<> pos_dis(0, password.length());
-
-            char special_char = special_chars_subset[char_dis(gen)];
-            int position = pos_dis(gen);
+            char special_char = special_chars_subset[rng.uniform(special_chars_subset.size())];
+            std::size_t position = rng.uniform(password.size() + 1);
             password.insert(position, 1, special_char);
         }
 
@@ -343,9 +383,8 @@ public:
                     } else if (lowercase) {
                         std::transform(word.begin(), word.end(), word.begin(), ::tolower);
                     } else if (random_case) {
-                        std::uniform_int_distribution<> case_dis(0, 1);
                         for (char& c : word) {
-                            c = case_dis(gen) == 0 ? std::toupper(c) : std::tolower(c);
+                            c = rng.uniform(2) == 0 ? std::toupper(c) : std::tolower(c);
                         }
                     }
 
@@ -392,9 +431,8 @@ public:
                     }
 
                     if (!char_pool.empty()) {
-                        std::uniform_int_distribution<> dis(0, char_pool.length() - 1);
                         for (int i = 0; i < length; i++) {
-                            password += char_pool[dis(gen)];
+                            password += char_pool[rng.uniform(char_pool.size())];
                         }
                     }
                     break;
@@ -419,8 +457,8 @@ public:
                         padding = std::stoi(it->second);
                     }
 
-                    std::uniform_int_distribution<> dis(min_val, max_val);
-                    int number = dis(gen);
+                    int number = min_val + static_cast<int>(rng.uniform(
+                        static_cast<std::uint64_t>(max_val) - min_val + 1));
 
                     std::ostringstream oss;
                     if (padding > 0) {
@@ -439,8 +477,10 @@ public:
                         separators = component.options;
                     }
 
-                    std::uniform_int_distribution<> dis(0, separators.size() - 1);
-                    password += separators[dis(gen)];
+                    if (separators.empty()) {
+                        throw std::invalid_argument("Separator list must not be empty");
+                    }
+                    password += separators[rng.uniform(separators.size())];
                     break;
                 }
             }
@@ -645,6 +685,39 @@ public:
 class UserInterface {
 private:
     PasswordGenerator gen;
+
+    static void writePrivateFile(const std::string& path, const std::string& contents) {
+#ifdef _WIN32
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
+        if (!file || !(file << contents)) {
+            throw std::runtime_error("Cannot write " + path);
+        }
+#else
+        int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+        if (fd < 0) {
+            throw std::runtime_error("Cannot securely open " + path + ": " + std::strerror(errno));
+        }
+        if (::fchmod(fd, S_IRUSR | S_IWUSR) != 0) {
+            const int error = errno;
+            ::close(fd);
+            throw std::runtime_error("Cannot restrict permissions on " + path + ": " + std::strerror(error));
+        }
+
+        std::size_t written = 0;
+        while (written < contents.size()) {
+            const ssize_t result = ::write(fd, contents.data() + written, contents.size() - written);
+            if (result < 0) {
+                const int error = errno;
+                ::close(fd);
+                throw std::runtime_error("Cannot write " + path + ": " + std::strerror(error));
+            }
+            written += static_cast<std::size_t>(result);
+        }
+        if (::close(fd) != 0) {
+            throw std::runtime_error("Cannot close " + path);
+        }
+#endif
+    }
 
 public:
     bool askYesNo(const std::string& prompt, bool default_value = true) {
@@ -896,7 +969,7 @@ public:
 
             auto analysis = gen.checkPasswordStrength(password);
             std::cout << "\n" << (i + 1) << ". " << password << "\n";
-            std::cout << "   Strength: " << analysis.strength << " | Length: " << analysis.length
+            std::cout << "   Heuristic rating: " << analysis.strength << " | Length: " << analysis.length
                       << " | Score: " << analysis.score << "\n";
         }
 
@@ -938,7 +1011,7 @@ public:
             std::cout << "\nGenerated password: " << password << "\n";
 
             auto analysis = gen.checkPasswordStrength(password);
-            std::cout << "Password strength: " << analysis.strength << " (score: " << analysis.score << ")\n";
+            std::cout << "Heuristic rating: " << analysis.strength << " (score: " << analysis.score << ")\n";
 
             if (askYesNo("\nSave password to file?", false)) {
                 savePasswordToFile(password);
@@ -952,7 +1025,7 @@ public:
     void createMemorablePassword() {
         std::cout << "\n--- MEMORABLE PASSWORD ---\n";
 
-        int num_words = askNumber("Number of words", 2, 8, 4);
+        int num_words = askNumber("Number of words", 2, 8, 6);
 
         std::cout << "\nChoose separator:\n";
         std::cout << "1. Hyphen (-)\n";
@@ -976,7 +1049,7 @@ public:
         std::cout << "\nGenerated password: " << password << "\n";
 
         auto analysis = gen.checkPasswordStrength(password);
-        std::cout << "Password strength: " << analysis.strength << " (score: " << analysis.score << ")\n";
+        std::cout << "Heuristic rating: " << analysis.strength << " (score: " << analysis.score << ")\n";
 
         if (askYesNo("\nSave password to file?", false)) {
             savePasswordToFile(password);
@@ -1002,7 +1075,7 @@ public:
 
             auto analysis = gen.checkPasswordStrength(password);
             std::cout << "\n" << (i + 1) << ". " << password << "\n";
-            std::cout << "   Strength: " << analysis.strength << " | Length: " << analysis.length
+            std::cout << "   Heuristic rating: " << analysis.strength << " | Length: " << analysis.length
                       << " | Score: " << analysis.score << "\n";
         }
 
@@ -1043,7 +1116,7 @@ public:
                 auto analysis = gen.checkPasswordStrength(password);
 
                 std::cout << "\n" << (i + 1) << ". " << password << "\n";
-                std::cout << "   Strength: " << analysis.strength << " | Length: " << analysis.length
+                std::cout << "   Heuristic rating: " << analysis.strength << " | Length: " << analysis.length
                           << " | Score: " << analysis.score << "/15\n";
 
                 std::vector<std::string> composition;
@@ -1096,7 +1169,7 @@ public:
         if (password_type == 1) {
             length = askNumber("Password length", 4, 128, 12);
         } else if (password_type == 2) {
-            num_words = askNumber("Number of words", 2, 8, 4);
+            num_words = askNumber("Number of words", 2, 8, 6);
         } else {
             num_words = askNumber("Number of words", 2, 6, 3);
         }
@@ -1141,7 +1214,7 @@ public:
 
         std::cout << "\nPASSWORD ANALYSIS: '" << password << "'\n";
         std::cout << std::string(50, '=') << "\n";
-        std::cout << "Password strength: " << analysis.strength << "\n";
+        std::cout << "Heuristic rating (not an entropy estimate): " << analysis.strength << "\n";
         std::cout << "Length: " << analysis.length << " characters\n";
         std::cout << "Score: " << analysis.score << "/15\n";
         std::cout << "Unique characters: " << analysis.unique_chars << "\n";
@@ -1215,12 +1288,12 @@ public:
             std::ostringstream timestamp;
             timestamp << std::put_time(local_time, "%Y-%m-%d %H:%M:%S");
 
-            std::ofstream file("password.txt");
-            file << "Generated password (" << timestamp.str() << "):\n";
-            file << password << "\n";
-            file.close();
+            std::ostringstream contents;
+            contents << "Generated password (" << timestamp.str() << "):\n";
+            contents << password << "\n";
+            writePrivateFile("password.txt", contents.str());
 
-            std::cout << "Password saved to 'password.txt'\n";
+            std::cout << "Password saved to 'password.txt' (owner-only permissions where supported)\n";
         } catch (const std::exception& e) {
             std::cout << "Error saving: " << e.what() << "\n";
         }
@@ -1234,16 +1307,17 @@ public:
             std::ostringstream timestamp;
             timestamp << std::put_time(local_time, "%Y-%m-%d %H:%M:%S");
 
-            std::ofstream file("passwords.txt");
-            file << "Generated passwords (" << timestamp.str() << "):\n";
-            file << std::string(40, '=') << "\n";
+            std::ostringstream contents;
+            contents << "Generated passwords (" << timestamp.str() << "):\n";
+            contents << std::string(40, '=') << "\n";
 
             for (size_t i = 0; i < passwords.size(); i++) {
-                file << (i + 1) << ". " << passwords[i] << "\n";
+                contents << (i + 1) << ". " << passwords[i] << "\n";
             }
-            file.close();
+            writePrivateFile("passwords.txt", contents.str());
 
-            std::cout << passwords.size() << " passwords saved to 'passwords.txt'\n";
+            std::cout << passwords.size()
+                      << " passwords saved to 'passwords.txt' (owner-only permissions where supported)\n";
         } catch (const std::exception& e) {
             std::cout << "Error saving: " << e.what() << "\n";
         }
@@ -1251,7 +1325,7 @@ public:
 
     void run() {
         std::cout << "Welcome to Password Generator!\n";
-        std::cout << "Checking word libraries availability...\n";
+        std::cout << "EFF Diceware wordlist loaded (7776 words).\n";
 
         while (true) {
             showMenu();

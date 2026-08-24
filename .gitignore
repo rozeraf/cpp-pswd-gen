@@ -30,3 +30,11 @@
 *.exe
 *.out
 *.app
+/pswd_gen
+
+# Build directories
+/build/
+
+# Generated secrets
+/password.txt
+/passwords.txt

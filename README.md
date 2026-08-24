@@ -1,21 +1,35 @@
 
 # C++ Password Generator
 
-A flexible command-line password generator written in modern C++.  
-Supports multiple generation modes with a high level of customization.
+A cryptographically secure command-line password generator written in modern C++.
+All random choices are made with OpenSSL's `RAND_priv_bytes()` CSPRNG.
 
 ## Features
 
 - Standard password — quick, strong, randomized password  
-- Memorable password — readable, easy to remember  
+- Diceware passphrase — words from the 7,776-entry EFF Large Wordlist
 - Complex memorable password — more secure, still user-friendly  
 - Custom password builder — define length, character sets, patterns  
 - Multiple passwords — generate many at once  
-- Password strength check — basic security estimation  
+- Password strength check — heuristic feedback (not an entropy measurement)
 - Quick generation — one-click generation  
 - Generation by complexity level — pick desired strength or entropy
 
 ---
+
+## Security properties
+
+- No `rand()`, Mersenne Twister, or deterministic PRNG is used.
+- Integer selection uses rejection sampling, avoiding modulo bias.
+- Shuffling uses Fisher–Yates driven by the same CSPRNG.
+- Diceware mode defaults to six words. The default 4–8 character filter leaves
+  6,137 possible words, giving about 75.5 bits of word-selection entropy before
+  optional suffixes. Using the complete list gives about 77.5 bits.
+- On POSIX systems exported password files are created with mode `0600` and
+  symbolic-link targets are rejected. Plain-text export is still optional and
+  should be used with care.
+- The strength checker is only a heuristic for user-supplied passwords; its label
+  is not proof of cryptographic security.
 
 ## Usage
 
@@ -39,11 +53,19 @@ Clone the repository and build the project following the instructions for your p
 git clone https://github.com/rafabduloff/cpp-pswd-gen.git
 cd cpp-pswd-gen
 
-# Build with g++
-g++ -std=c++17 -o password-generator main.cpp
+# Dependencies (Debian/Ubuntu)
+sudo apt install clang cmake make libssl-dev
+
+# Build with CMake (uses clang++ by default)
+cmake -S . -B build
+cmake --build build
 
 # Run
-./password-generator
+./build/cpp_pswd_gen
+
+# Or build directly with Make
+make
+./pswd_gen
 ```
 
 If you have multiple source files or use CMake, update these commands accordingly.
@@ -68,18 +90,15 @@ git clone git@github.com:rafabduloff/cpp-pswd-gen.git
 cd cpp-pswd-gen
 
 # Build with MSVC (Visual Studio Developer Command Prompt)
-cl /EHsc /std:c++17 main.cpp /Fe:password_generator.exe
+cmake -S . -B build
+cmake --build build --config Release
 
 # Run
-.\password_generator.exe
+.\build\Release\cpp_pswd_gen.exe
 ```
 
-Alternatively, you can build with MinGW's g++ if installed:
-
-```powershell
-g++ -std=c++17 -o password_generator.exe main.cpp
-.\password_generator.exe
-```
+OpenSSL development libraries must be discoverable by CMake (for example via
+vcpkg or a standard OpenSSL installation).
 
 </details>
 
@@ -90,3 +109,10 @@ g++ -std=c++17 -o password_generator.exe main.cpp
 ![Menu](menu.png)
 
 ---
+
+## Diceware data
+
+`data/eff_large_wordlist.txt` is the
+[EFF Large Wordlist for Passphrases](https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt)
+(7,776 entries). EFF recommends at least six words from its long list. EFF site
+content is published under [CC BY 3.0 US](https://www.eff.org/copyright).
